@@ -6,6 +6,7 @@ class ValidationResult:
     is_valid: bool
     media_type: str | None = None
     message: str = ""
+    details: dict[str, object] = field(default_factory=dict)
 
 
 @dataclass(frozen=True)

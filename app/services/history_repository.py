@@ -1,17 +1,28 @@
 import json
+import os
 import sqlite3
 from contextlib import contextmanager
 from datetime import datetime
+from pathlib import Path
 
 from app.core.constants import DATABASE_PATH
 from app.core.models import AnalysisResult, HistoryRecord
 
 
+HISTORY_RETENTION_LIMIT = 500
+SOURCE_PATH_POLICY = "filename_only"
+INTEGRITY_PASSED = "Пройдено"
+INTEGRITY_FAILED = "Нарушено"
+INTEGRITY_UNKNOWN = "Не проверено"
+
+
 class HistoryRepository:
     def __init__(self, db_path=DATABASE_PATH):
-        self.db_path = db_path
+        self.db_path = Path(db_path)
         self.db_path.parent.mkdir(parents=True, exist_ok=True)
+        self.apply_storage_permissions()
         self.initialize()
+        self.apply_storage_permissions()
 
     def initialize(self):
         with self.connect() as connection:
@@ -56,10 +67,13 @@ class HistoryRepository:
             if column not in columns:
                 connection.execute(statement)
 
+        self.sanitize_legacy_paths(connection)
+
     @contextmanager
     def connect(self):
         connection = sqlite3.connect(self.db_path)
         connection.row_factory = sqlite3.Row
+        self.apply_connection_pragmas(connection)
         try:
             yield connection
             connection.commit()
@@ -71,6 +85,9 @@ class HistoryRepository:
 
     def add(self, result: AnalysisResult):
         with self.connect() as connection:
+            created_at = datetime.now().isoformat(timespec="seconds")
+            technical_info = self.prepare_technical_info(result, created_at)
+            safe_file_name = self.safe_file_name(result.file_name or result.file_path)
             cursor = connection.execute(
                 """
                 INSERT INTO analysis_history (
@@ -91,9 +108,9 @@ class HistoryRepository:
                 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 (
-                    datetime.now().isoformat(timespec="seconds"),
-                    result.file_path,
-                    result.file_name,
+                    created_at,
+                    safe_file_name,
+                    safe_file_name,
                     result.media_type,
                     result.file_size,
                     result.status,
@@ -102,10 +119,11 @@ class HistoryRepository:
                     result.raw_result,
                     result.error_message,
                     result.duration,
-                    self.encode_json(result.technical_info, {}),
+                    self.encode_json(technical_info, {}),
                     self.encode_json(result.findings, []),
                 ),
             )
+            self.prune_old_records(connection)
             return cursor.lastrowid
 
     def list_recent(self, limit=100):
@@ -139,9 +157,13 @@ class HistoryRepository:
     def clear(self):
         with self.connect() as connection:
             connection.execute("DELETE FROM analysis_history")
+        self.vacuum()
 
-    @staticmethod
-    def row_to_record(row):
+    def row_to_record(self, row):
+        technical_info = self.decode_json(row["technical_info"], {})
+        findings = self.decode_json(row["findings"], [])
+        technical_info["database_integrity_status"] = self.database_integrity_status(row, technical_info, findings)
+
         return HistoryRecord(
             id=row["id"],
             created_at=row["created_at"],
@@ -155,9 +177,146 @@ class HistoryRepository:
             raw_result=row["raw_result"],
             error_message=row["error_message"],
             duration=row["duration"],
-            technical_info=HistoryRepository.decode_json(row["technical_info"], {}),
-            findings=HistoryRepository.decode_json(row["findings"], []),
+            technical_info=technical_info,
+            findings=findings,
         )
+
+    def prepare_technical_info(self, result, created_at):
+        technical_info = dict(result.technical_info or {})
+        technical_info["source_path_policy"] = SOURCE_PATH_POLICY
+        technical_info.pop("database_integrity_status", None)
+        technical_info.pop("database_record_hash", None)
+        technical_info["database_record_hash"] = self.calculate_record_hash(
+            created_at=created_at,
+            file_name=self.safe_file_name(result.file_name or result.file_path),
+            media_type=result.media_type,
+            file_size=result.file_size,
+            status=result.status,
+            verdict=result.verdict,
+            confidence=result.confidence,
+            sha256=technical_info.get("sha256"),
+            raw_result=result.raw_result,
+            findings=result.findings,
+        )
+        return technical_info
+
+    def database_integrity_status(self, row, technical_info, findings):
+        stored_hash = technical_info.get("database_record_hash")
+        if not stored_hash:
+            return INTEGRITY_UNKNOWN
+
+        actual_hash = self.calculate_record_hash(
+            created_at=row["created_at"],
+            file_name=row["file_name"],
+            media_type=row["media_type"],
+            file_size=row["file_size"],
+            status=row["status"],
+            verdict=row["verdict"],
+            confidence=row["confidence"],
+            sha256=technical_info.get("sha256"),
+            raw_result=row["raw_result"],
+            findings=findings,
+        )
+        return INTEGRITY_PASSED if stored_hash == actual_hash else INTEGRITY_FAILED
+
+    def prune_old_records(self, connection):
+        connection.execute(
+            """
+            DELETE FROM analysis_history
+            WHERE id NOT IN (
+                SELECT id
+                FROM analysis_history
+                ORDER BY created_at DESC, id DESC
+                LIMIT ?
+            )
+            """,
+            (HISTORY_RETENTION_LIMIT,),
+        )
+
+    def sanitize_legacy_paths(self, connection):
+        rows = connection.execute("SELECT id, file_path, file_name, technical_info FROM analysis_history").fetchall()
+        for row in rows:
+            safe_file_path = self.safe_file_name(row["file_path"])
+            safe_file_name = self.safe_file_name(row["file_name"])
+            technical_info = self.decode_json(row["technical_info"], {})
+            technical_info.setdefault("source_path_policy", SOURCE_PATH_POLICY)
+
+            if (
+                safe_file_path != row["file_path"]
+                or safe_file_name != row["file_name"]
+                or technical_info != self.decode_json(row["technical_info"], {})
+            ):
+                connection.execute(
+                    """
+                    UPDATE analysis_history
+                    SET file_path = ?, file_name = ?, technical_info = ?
+                    WHERE id = ?
+                    """,
+                    (safe_file_path, safe_file_name, self.encode_json(technical_info, {}), row["id"]),
+                )
+
+    def vacuum(self):
+        connection = sqlite3.connect(self.db_path)
+        try:
+            self.apply_connection_pragmas(connection)
+            connection.execute("VACUUM")
+        finally:
+            connection.close()
+
+    def apply_storage_permissions(self):
+        self.chmod_if_possible(self.db_path.parent, 0o700)
+        if self.db_path.exists():
+            self.chmod_if_possible(self.db_path, 0o600)
+
+    @staticmethod
+    def apply_connection_pragmas(connection):
+        connection.execute("PRAGMA foreign_keys = ON")
+        connection.execute("PRAGMA secure_delete = ON")
+        connection.execute("PRAGMA busy_timeout = 5000")
+        connection.execute("PRAGMA journal_mode = WAL")
+
+    @staticmethod
+    def chmod_if_possible(path, mode):
+        try:
+            os.chmod(path, mode)
+        except (AttributeError, NotImplementedError, OSError):
+            pass
+
+    @staticmethod
+    def safe_file_name(value):
+        text = str(value or "").replace("\\", "/").rstrip("/")
+        file_name = text.split("/")[-1]
+        return file_name or "Без файла"
+
+    @staticmethod
+    def calculate_record_hash(
+        created_at,
+        file_name,
+        media_type,
+        file_size,
+        status,
+        verdict,
+        confidence,
+        sha256,
+        raw_result,
+        findings,
+    ):
+        import hashlib
+
+        payload = {
+            "created_at": created_at,
+            "file_name": file_name,
+            "media_type": media_type,
+            "file_size": file_size,
+            "status": status,
+            "verdict": verdict,
+            "confidence": confidence,
+            "sha256": sha256,
+            "raw_result": raw_result,
+            "findings": findings or [],
+        }
+        encoded = json.dumps(payload, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
+        return hashlib.sha256(encoded.encode("utf-8")).hexdigest()
 
     @staticmethod
     def encode_json(value, fallback):

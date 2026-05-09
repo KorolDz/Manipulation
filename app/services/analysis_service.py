@@ -26,12 +26,12 @@ class AnalysisService:
     def analyze(self, media_type, file_path):
         validation = validate_media_file(file_path, media_type)
         if not validation.is_valid:
-            return self.error_result(media_type, file_path, validation.message)
+            return self.error_result(media_type, file_path, validation.message, technical_info=validation.details)
 
         try:
-            media_info = self.preprocessor.preprocess(media_type, file_path)
+            media_info = self.preprocessor.preprocess(media_type, file_path, validation.details)
         except Exception as exc:
-            return self.error_result(media_type, file_path, f"Ошибка предобработки: {exc}")
+            return self.error_result(media_type, file_path, f"Ошибка предобработки: {exc}", technical_info=validation.details)
 
         try:
             if media_type == AUDIO:
@@ -68,12 +68,12 @@ class AnalysisService:
             findings=findings,
         )
 
-    def error_result(self, media_type, file_path, message, raw_result="", media_info=None):
+    def error_result(self, media_type, file_path, message, raw_result="", media_info=None, technical_info=None):
         file_name = media_info.file_name if media_info else self.file_name(file_path)
         file_path_value = media_info.file_path if media_info else str(file_path or "")
         file_size_value = media_info.file_size if media_info else (file_size(file_path) if file_path else None)
         duration = media_info.duration if media_info else None
-        technical_info = media_info.technical_info if media_info else {}
+        technical_info = media_info.technical_info if media_info else (technical_info or {})
 
         return AnalysisResult(
             file_path=file_path_value,
@@ -109,6 +109,10 @@ class AnalysisService:
         if warning:
             findings.append(str(warning))
 
+        security_warning = media_info.technical_info.get("security_warning")
+        if security_warning:
+            findings.append(str(security_warning))
+
         if parsed.verdict == VERDICT_DEEPFAKE:
             if parsed.confidence is None:
                 findings.append("Модель обнаружила признаки цифровой манипуляции.")
@@ -131,9 +135,12 @@ class AnalysisService:
     def build_error_findings(message, technical_info):
         findings = []
         warning = technical_info.get("preprocess_warning") if technical_info else None
+        security_warning = technical_info.get("security_warning") if technical_info else None
 
         if warning:
             findings.append(str(warning))
+        if security_warning:
+            findings.append(str(security_warning))
 
         text = message or "Анализ не выполнен."
         if "Лица не найдены" in text:

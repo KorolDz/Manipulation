@@ -41,6 +41,9 @@ from app.ui.styles import APP_STYLESHEET
 from app.ui.worker import AnalysisWorker
 
 
+HIDDEN_TECHNICAL_KEYS = {"source_path_policy"}
+
+
 class DeepfakeDetectorWindow(QMainWindow):
     def __init__(self):
         super().__init__()
@@ -270,7 +273,7 @@ class DeepfakeDetectorWindow(QMainWindow):
 
         validation = validate_media_file(file_path, media_type)
         if not validation.is_valid:
-            result = self.analysis_service.error_result(media_type, file_path, validation.message)
+            result = self.analysis_service.error_result(media_type, file_path, validation.message, technical_info=validation.details)
             self.repository.add(result)
             self.show_result(result)
             self.load_history()
@@ -433,8 +436,8 @@ class DeepfakeDetectorWindow(QMainWindow):
         ]
 
         for key, value in sorted((result.technical_info or {}).items()):
-            if value is not None and value != "":
-                rows.append((self.technical_label(key), str(value)))
+            if key not in HIDDEN_TECHNICAL_KEYS and value is not None and value != "":
+                rows.append((self.technical_label(key), self.technical_value(value)))
 
         return rows
 
@@ -584,6 +587,8 @@ class DeepfakeDetectorWindow(QMainWindow):
     def technical_label(key):
         labels = {
             "channels": "Каналы",
+            "database_integrity_status": "Целостность записи",
+            "database_record_hash": "Хэш записи БД",
             "extension": "Расширение",
             "format": "Формат",
             "fps": "FPS",
@@ -592,10 +597,20 @@ class DeepfakeDetectorWindow(QMainWindow):
             "preprocess_warning": "Предобработка",
             "resolution": "Разрешение",
             "sample_rate": "Sample rate",
+            "security_checks": "Проверки безопасности",
+            "security_status": "Статус безопасности",
+            "security_warning": "Предупреждение безопасности",
+            "sha256": "SHA-256",
             "subtype": "Subtype",
             "width": "Ширина",
         }
         return labels.get(key, key)
+
+    @staticmethod
+    def technical_value(value):
+        if isinstance(value, (list, tuple)):
+            return "; ".join(str(item) for item in value)
+        return str(value)
 
     def set_controls_enabled(self, enabled):
         self.audio_button.setEnabled(enabled)
