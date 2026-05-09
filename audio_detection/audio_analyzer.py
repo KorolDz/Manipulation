@@ -1,16 +1,43 @@
+import os
+import threading
+
 import librosa
 import numpy as np
 import tensorflow as tf
-import os
+
+
+AUDIO_MODEL_PATH = os.path.join("weights", "audio_deepfake_v1.h5")
+_AUDIO_MODEL = None
+_AUDIO_MODEL_LOCK = threading.Lock()
+
+
+def get_audio_model():
+    global _AUDIO_MODEL
+
+    if _AUDIO_MODEL is not None:
+        return _AUDIO_MODEL
+
+    with _AUDIO_MODEL_LOCK:
+        if _AUDIO_MODEL is not None:
+            return _AUDIO_MODEL
+
+        if not os.path.exists(AUDIO_MODEL_PATH):
+            raise FileNotFoundError("Веса аудио-модели не найдены")
+
+        _AUDIO_MODEL = tf.keras.models.load_model(AUDIO_MODEL_PATH, compile=False)
+        return _AUDIO_MODEL
+
+
+def clear_audio_model_cache():
+    global _AUDIO_MODEL
+
+    with _AUDIO_MODEL_LOCK:
+        _AUDIO_MODEL = None
+
 
 def analyze_audio(audio_path):
-    model_path = os.path.join('weights', 'audio_deepfake_v1.h5')
-    
-    if not os.path.exists(model_path):
-        return "Ошибка: Веса аудио-модели не найдены"
-
     try:
-        model = tf.keras.models.load_model(model_path, compile=False)
+        model = get_audio_model()
         
         # Загружаем аудио (до 4 секунд)
         y, sr = librosa.load(audio_path, duration=4)
@@ -37,5 +64,7 @@ def analyze_audio(audio_path):
         else:
             return f"ORIGINAL (Вероятность: {(1 - avg_score) * 100:.1f}%)"
             
+    except FileNotFoundError as e:
+        return f"Ошибка: {e}"
     except Exception as e:
         return f"Ошибка анализа аудио: {e}"

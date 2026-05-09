@@ -1,8 +1,19 @@
+import os
+import threading
+
 import cv2
 import numpy as np
 import tensorflow as tf
-import os
 from tensorflow.keras import layers, models
+
+
+VIDEO_WEIGHTS_PATH = os.path.join("weights", "efficient_weights.weights.h5")
+FACE_CASCADE_PATH = "haarcascade_frontalface_default.xml"
+
+_VIDEO_MODEL = None
+_FACE_CASCADE = None
+_VIDEO_MODEL_LOCK = threading.Lock()
+_FACE_CASCADE_LOCK = threading.Lock()
 
 def build_model_architecture():
     # Создаем базу БЕЗ встроенных весов
@@ -26,18 +37,64 @@ def build_model_architecture():
     ])
     return model
 
-def analyze_video(video_path):
-    weights_path = os.path.join('weights', 'efficient_weights.weights.h5')
-    cascade_path = 'haarcascade_frontalface_default.xml'
-    
-    # Загружаем модель один раз
-    try:
+
+def get_video_model():
+    global _VIDEO_MODEL
+
+    if _VIDEO_MODEL is not None:
+        return _VIDEO_MODEL
+
+    with _VIDEO_MODEL_LOCK:
+        if _VIDEO_MODEL is not None:
+            return _VIDEO_MODEL
+
+        if not os.path.exists(VIDEO_WEIGHTS_PATH):
+            raise FileNotFoundError("Веса видео-модели не найдены")
+
         model = build_model_architecture()
-        model.load_weights(weights_path)
+        model.load_weights(VIDEO_WEIGHTS_PATH)
+        _VIDEO_MODEL = model
+        return _VIDEO_MODEL
+
+
+def get_face_cascade():
+    global _FACE_CASCADE
+
+    if _FACE_CASCADE is not None:
+        return _FACE_CASCADE
+
+    with _FACE_CASCADE_LOCK:
+        if _FACE_CASCADE is not None:
+            return _FACE_CASCADE
+
+        if not os.path.exists(FACE_CASCADE_PATH):
+            raise FileNotFoundError("Каскад распознавания лиц не найден")
+
+        cascade = cv2.CascadeClassifier(FACE_CASCADE_PATH)
+        if cascade.empty():
+            raise RuntimeError("Каскад распознавания лиц не загружен")
+
+        _FACE_CASCADE = cascade
+        return _FACE_CASCADE
+
+
+def clear_video_model_cache():
+    global _VIDEO_MODEL, _FACE_CASCADE
+
+    with _VIDEO_MODEL_LOCK:
+        _VIDEO_MODEL = None
+
+    with _FACE_CASCADE_LOCK:
+        _FACE_CASCADE = None
+
+
+def analyze_video(video_path):
+    try:
+        model = get_video_model()
+        face_cascade = get_face_cascade()
     except Exception as e:
         return f"Ошибка модели: {e}"
 
-    face_cascade = cv2.CascadeClassifier(cascade_path)
     cap = cv2.VideoCapture(video_path)
     predictions = []
     

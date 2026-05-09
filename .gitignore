@@ -11,6 +11,8 @@ __pycache__/
 *.jpg
 temp/
 results/
+data/*.sqlite3
+data/*.sqlite3-*
 
 # Веса моделей (обычно их не пушат, но если напарнику они нужны сразу — можно оставить)
 # Если хочешь скрыть веса:
@@ -20,3 +22,5 @@ results/
 .DS_Store
 .vscode/
 .idea/
+
+project.txt
