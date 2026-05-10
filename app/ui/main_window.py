@@ -1,5 +1,6 @@
 import html
 import textwrap
+from pathlib import Path
 
 from PySide6.QtCore import QMarginsF, QSizeF, QThread, Qt
 from PySide6.QtGui import QPageLayout, QPageSize, QPdfWriter, QPixmap, QTextDocument
@@ -199,8 +200,14 @@ class DeepfakeDetectorWindow(QMainWindow):
         self.export_pdf_button.setEnabled(False)
         self.export_pdf_button.clicked.connect(self.export_report_pdf)
 
+        self.export_html_button = QPushButton("Экспорт HTML")
+        self.export_html_button.setObjectName("exportButton")
+        self.export_html_button.setEnabled(False)
+        self.export_html_button.clicked.connect(self.export_report_html)
+
         top_row.addWidget(section_title)
         top_row.addStretch(1)
+        top_row.addWidget(self.export_html_button)
         top_row.addWidget(self.export_pdf_button)
 
         tables_row = QHBoxLayout()
@@ -215,7 +222,7 @@ class DeepfakeDetectorWindow(QMainWindow):
         self.report_table.horizontalHeader().setSectionResizeMode(1, QHeaderView.Stretch)
 
         self.findings_table = QTableWidget(0, 1)
-        self.findings_table.setHorizontalHeaderLabels(["Несоответствия"])
+        self.findings_table.setHorizontalHeaderLabels(["Результаты анализа"])
         self.findings_table.setEditTriggers(QAbstractItemView.NoEditTriggers)
         self.findings_table.setSelectionMode(QAbstractItemView.NoSelection)
         self.findings_table.verticalHeader().setVisible(False)
@@ -420,9 +427,11 @@ class DeepfakeDetectorWindow(QMainWindow):
         self.report_table.setRowCount(0)
         self.findings_table.setRowCount(0)
         self.clear_evidence_frame()
+        self.export_html_button.setEnabled(False)
         self.export_pdf_button.setEnabled(False)
 
     def show_report(self, result):
+        self.export_html_button.setEnabled(True)
         self.export_pdf_button.setEnabled(True)
         report_view = self.visualization_stage.build_report_view(result)
         self.report_table.setRowCount(0)
@@ -468,6 +477,27 @@ class DeepfakeDetectorWindow(QMainWindow):
         self.evidence_frame_caption.clear()
         self.evidence_frame_caption.setVisible(False)
 
+    def export_report_html(self):
+        if self.current_result is None:
+            QMessageBox.information(self, "Экспорт HTML", "Нет отчета для экспорта.")
+            return
+
+        default_name = self.default_html_name(self.current_result)
+        file_path, _ = QFileDialog.getSaveFileName(self, "Сохранить отчет", default_name, "HTML (*.html)")
+        if not file_path:
+            return
+
+        if not file_path.lower().endswith((".html", ".htm")):
+            file_path += ".html"
+
+        try:
+            self.write_report_html(self.current_result, file_path)
+        except Exception as exc:
+            QMessageBox.critical(self, "Экспорт HTML", f"Не удалось сохранить HTML: {exc}")
+            return
+
+        QMessageBox.information(self, "Экспорт HTML", "Отчет сохранен.")
+
     def export_report_pdf(self):
         if self.current_result is None:
             QMessageBox.information(self, "Экспорт PDF", "Нет отчета для экспорта.")
@@ -506,6 +536,9 @@ class DeepfakeDetectorWindow(QMainWindow):
         document.setTextWidth(paint_rect.width())
         document.setHtml(self.build_report_html(result))
         document.print_(writer)
+
+    def write_report_html(self, result, file_path):
+        Path(file_path).write_text(self.build_report_html(result), encoding="utf-8")
 
     def build_report_html(self, result):
         verdict = "Ошибка" if result.status == STATUS_ERROR else verdict_label(result.verdict)
@@ -631,7 +664,7 @@ class DeepfakeDetectorWindow(QMainWindow):
                 <div class="badge {badge_class}">{html.escape(verdict)} · {html.escape(confidence)}</div>
                 <h2>Параметры проверки</h2>
                 <table>{rows_html}</table>
-                <h2>Обнаруженные несоответствия</h2>
+                <h2>Результаты анализа</h2>
                 <ul>{findings_html}</ul>
                 {evidence_html}
             </body>
@@ -644,6 +677,12 @@ class DeepfakeDetectorWindow(QMainWindow):
         base_name = result.file_name.rsplit(".", 1)[0] or "report"
         safe_name = "".join(char if char.isalnum() or char in ("-", "_") else "_" for char in base_name)
         return f"{safe_name}_report.pdf"
+
+    @staticmethod
+    def default_html_name(result):
+        base_name = result.file_name.rsplit(".", 1)[0] or "report"
+        safe_name = "".join(char if char.isalnum() or char in ("-", "_") else "_" for char in base_name)
+        return f"{safe_name}_report.html"
 
     @staticmethod
     def report_badge_class(result):

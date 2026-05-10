@@ -15,7 +15,7 @@ def main():
     app.setStyle("Fusion")
 
     window = DeepfakeDetectorWindow()
-    window.show()
+    window.showMaximized()
 
     return app.exec()
 
