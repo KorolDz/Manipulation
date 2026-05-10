@@ -1,26 +1,54 @@
-# Виртуальное окружение
+# Виртуальное окружение Python
 venv/
-.env
+.venv/
+env/
+
+# Кэш и служебные файлы Python
 __pycache__/
 *.py[cod]
+*$py.class
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
 
-# Данные и результаты
+# Локальные настройки, секреты и логи
+.env
+.env.*
+*.log
+.coverage
+coverage.xml
+htmlcov/
+
+# Локальные данные приложения и результаты анализа
+data/
+temp/
+tmp/
+results/
+*_report.pdf
+*_report.html
+
+# Входные медиафайлы для проверки
 *.mp4
+*.avi
+*.mov
+*.mkv
+*.webm
+*.wav
+*.mp3
 *.flac
+
+# Изображения и промежуточные кадры
 *.png
 *.jpg
-temp/
-results/
-data/*.sqlite3
-data/*.sqlite3-*
+*.jpeg
 
-# Веса моделей (обычно их не пушат, но если напарнику они нужны сразу — можно оставить)
-# Если хочешь скрыть веса:
-# weights/
-
-# Системные файлы
-.DS_Store
-.vscode/
+# IDE и системные файлы
 .idea/
+.vscode/
+.vs/
+.DS_Store
+Thumbs.db
+desktop.ini
 
+# Личные черновики
 project.txt
