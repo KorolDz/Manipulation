@@ -45,6 +45,30 @@ class HistoryRepositorySecurityTests(unittest.TestCase):
             self.assertEqual(records[0].file_name, f"file_{HISTORY_RETENTION_LIMIT}.wav")
             self.assertNotIn("file_0.wav", {record.file_name for record in records})
 
+    def test_retention_removes_evidence_file_for_pruned_record(self):
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            root = Path(tmp_dir)
+            evidence_dir = root / "data" / "evidence_frames"
+            evidence_dir.mkdir(parents=True)
+            repository = HistoryRepository(root / "data" / "app.sqlite3")
+
+            for index in range(HISTORY_RETENTION_LIMIT + 1):
+                evidence_path = evidence_dir / f"frame_{index}.jpg"
+                evidence_path.write_bytes(b"jpeg")
+                repository.add(
+                    self.result(
+                        file_path=f"C:/media/file_{index}.wav",
+                        file_name=f"file_{index}.wav",
+                        technical_info={
+                            "sha256": "abc123",
+                            "video_evidence_frame_path": f"data/evidence_frames/frame_{index}.jpg",
+                        },
+                    )
+                )
+
+            self.assertFalse((evidence_dir / "frame_0.jpg").exists())
+            self.assertTrue((evidence_dir / f"frame_{HISTORY_RETENTION_LIMIT}.jpg").exists())
+
     def test_clear_removes_all_history(self):
         with tempfile.TemporaryDirectory() as tmp_dir:
             repository = HistoryRepository(Path(tmp_dir) / "data" / "app.sqlite3")
@@ -53,6 +77,52 @@ class HistoryRepositorySecurityTests(unittest.TestCase):
             repository.clear()
 
             self.assertEqual(repository.list_recent(), [])
+
+    def test_clear_removes_only_managed_evidence_files(self):
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            root = Path(tmp_dir)
+            evidence_dir = root / "data" / "evidence_frames"
+            evidence_dir.mkdir(parents=True)
+            managed_evidence = evidence_dir / "frame.jpg"
+            managed_evidence.write_bytes(b"jpeg")
+            managed_audio_evidence = evidence_dir / "audio_frame.jpg"
+            managed_audio_evidence.write_bytes(b"audio-jpeg")
+            outside_file = root / "outside.jpg"
+            outside_file.write_bytes(b"outside")
+
+            repository = HistoryRepository(root / "data" / "app.sqlite3")
+            repository.add(
+                self.result(
+                    technical_info={
+                        "sha256": "abc123",
+                        "video_evidence_frame_path": "data/evidence_frames/frame.jpg",
+                    },
+                )
+            )
+            repository.add(
+                self.result(
+                    file_name="audio.wav",
+                    technical_info={
+                        "sha256": "audio123",
+                        "audio_evidence_frame_path": "data/evidence_frames/audio_frame.jpg",
+                    },
+                )
+            )
+            repository.add(
+                self.result(
+                    file_name="outside.wav",
+                    technical_info={
+                        "sha256": "def456",
+                        "video_evidence_frame_path": str(outside_file),
+                    },
+                )
+            )
+
+            repository.clear()
+
+            self.assertFalse(managed_evidence.exists())
+            self.assertFalse(managed_audio_evidence.exists())
+            self.assertTrue(outside_file.exists())
 
     def test_initialize_sanitizes_legacy_full_paths(self):
         with tempfile.TemporaryDirectory() as tmp_dir:
@@ -86,7 +156,12 @@ class HistoryRepositorySecurityTests(unittest.TestCase):
             self.assertEqual(records[0].technical_info["database_integrity_status"], INTEGRITY_FAILED)
 
     @staticmethod
-    def result(file_path=r"C:\media\voice.wav", file_name="voice.wav", raw_result="ORIGINAL (99.0%)"):
+    def result(
+        file_path=r"C:\media\voice.wav",
+        file_name="voice.wav",
+        raw_result="ORIGINAL (99.0%)",
+        technical_info=None,
+    ):
         return AnalysisResult(
             file_path=file_path,
             file_name=file_name,
@@ -97,7 +172,7 @@ class HistoryRepositorySecurityTests(unittest.TestCase):
             confidence=99.0,
             raw_result=raw_result,
             duration=1.5,
-            technical_info={"sha256": "abc123"},
+            technical_info=technical_info or {"sha256": "abc123"},
             findings=["Критичные признаки подделки не обнаружены."],
         )
 

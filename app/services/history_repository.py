@@ -14,6 +14,10 @@ SOURCE_PATH_POLICY = "filename_only"
 INTEGRITY_PASSED = "Пройдено"
 INTEGRITY_FAILED = "Нарушено"
 INTEGRITY_UNKNOWN = "Не проверено"
+EVIDENCE_FRAME_PATH_KEYS = {
+    "audio_evidence_frame_path",
+    "video_evidence_frame_path",
+}
 
 
 class HistoryRepository:
@@ -156,7 +160,10 @@ class HistoryRepository:
 
     def clear(self):
         with self.connect() as connection:
+            rows = connection.execute("SELECT technical_info FROM analysis_history").fetchall()
+            evidence_paths = self.evidence_paths_from_rows(rows)
             connection.execute("DELETE FROM analysis_history")
+        self.delete_evidence_files(evidence_paths)
         self.vacuum()
 
     def row_to_record(self, row):
@@ -220,6 +227,21 @@ class HistoryRepository:
         return INTEGRITY_PASSED if stored_hash == actual_hash else INTEGRITY_FAILED
 
     def prune_old_records(self, connection):
+        rows_to_prune = connection.execute(
+            """
+            SELECT technical_info
+            FROM analysis_history
+            WHERE id NOT IN (
+                SELECT id
+                FROM analysis_history
+                ORDER BY created_at DESC, id DESC
+                LIMIT ?
+            )
+            """,
+            (HISTORY_RETENTION_LIMIT,),
+        ).fetchall()
+        evidence_paths_to_prune = self.evidence_paths_from_rows(rows_to_prune)
+
         connection.execute(
             """
             DELETE FROM analysis_history
@@ -232,6 +254,44 @@ class HistoryRepository:
             """,
             (HISTORY_RETENTION_LIMIT,),
         )
+        remaining_rows = connection.execute("SELECT technical_info FROM analysis_history").fetchall()
+        remaining_evidence_paths = self.evidence_paths_from_rows(remaining_rows)
+        self.delete_evidence_files(evidence_paths_to_prune - remaining_evidence_paths)
+
+    def evidence_paths_from_rows(self, rows):
+        evidence_paths = set()
+        for row in rows:
+            technical_info = self.decode_json(row["technical_info"], {})
+            for key in EVIDENCE_FRAME_PATH_KEYS:
+                evidence_path = technical_info.get(key)
+                if evidence_path:
+                    evidence_paths.add(str(evidence_path))
+        return evidence_paths
+
+    def delete_evidence_files(self, evidence_paths):
+        for evidence_path in evidence_paths:
+            resolved_path = self.resolve_managed_evidence_path(evidence_path)
+            if resolved_path is None or not resolved_path.is_file():
+                continue
+
+            try:
+                resolved_path.unlink()
+            except OSError:
+                pass
+
+    def resolve_managed_evidence_path(self, evidence_path):
+        path = Path(str(evidence_path))
+        storage_root = self.db_path.parent.parent
+        candidate = path if path.is_absolute() else storage_root / path
+
+        try:
+            resolved_candidate = candidate.resolve(strict=False)
+            evidence_dir = (self.db_path.parent / "evidence_frames").resolve(strict=False)
+            resolved_candidate.relative_to(evidence_dir)
+        except (OSError, ValueError):
+            return None
+
+        return resolved_candidate
 
     def sanitize_legacy_paths(self, connection):
         rows = connection.execute("SELECT id, file_path, file_name, technical_info FROM analysis_history").fetchall()

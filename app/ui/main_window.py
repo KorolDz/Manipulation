@@ -1,7 +1,8 @@
 import html
+import textwrap
 
-from PySide6.QtCore import QMarginsF, QThread, Qt
-from PySide6.QtGui import QPageLayout, QPageSize, QPdfWriter, QTextDocument
+from PySide6.QtCore import QMarginsF, QSizeF, QThread, Qt
+from PySide6.QtGui import QPageLayout, QPageSize, QPdfWriter, QPixmap, QTextDocument
 from PySide6.QtWidgets import (
     QAbstractItemView,
     QFileDialog,
@@ -36,12 +37,14 @@ from app.core.presentation import (
 )
 from app.services.analysis_service import AnalysisService
 from app.services.history_repository import HistoryRepository
+from app.services.pipeline_stages import VisualizationStage
 from app.services.validation import validate_media_file
 from app.ui.styles import APP_STYLESHEET
 from app.ui.worker import AnalysisWorker
 
 
-HIDDEN_TECHNICAL_KEYS = {"source_path_policy"}
+PDF_MARGIN_MM = 15
+PDF_EVIDENCE_IMAGE_WIDTH_PT = 460
 
 
 class DeepfakeDetectorWindow(QMainWindow):
@@ -54,6 +57,7 @@ class DeepfakeDetectorWindow(QMainWindow):
         self.history_records = []
         self.repository = HistoryRepository()
         self.analysis_service = AnalysisService()
+        self.visualization_stage = VisualizationStage()
 
         self.setWindowTitle("Deepfake Detector")
         self.resize(1120, 720)
@@ -220,8 +224,21 @@ class DeepfakeDetectorWindow(QMainWindow):
         tables_row.addWidget(self.report_table, 3)
         tables_row.addWidget(self.findings_table, 2)
 
+        self.evidence_frame_view = QLabel()
+        self.evidence_frame_view.setObjectName("evidenceFrameView")
+        self.evidence_frame_view.setAlignment(Qt.AlignCenter)
+        self.evidence_frame_view.setMinimumHeight(160)
+        self.evidence_frame_view.setVisible(False)
+
+        self.evidence_frame_caption = QLabel()
+        self.evidence_frame_caption.setObjectName("evidenceFrameCaption")
+        self.evidence_frame_caption.setWordWrap(True)
+        self.evidence_frame_caption.setVisible(False)
+
         layout.addLayout(top_row)
         layout.addLayout(tables_row)
+        layout.addWidget(self.evidence_frame_view)
+        layout.addWidget(self.evidence_frame_caption)
 
         return panel
 
@@ -402,44 +419,54 @@ class DeepfakeDetectorWindow(QMainWindow):
     def clear_report(self):
         self.report_table.setRowCount(0)
         self.findings_table.setRowCount(0)
+        self.clear_evidence_frame()
         self.export_pdf_button.setEnabled(False)
 
     def show_report(self, result):
         self.export_pdf_button.setEnabled(True)
-        rows = self.report_rows(result)
+        report_view = self.visualization_stage.build_report_view(result)
         self.report_table.setRowCount(0)
-        for parameter, value in rows:
+        for parameter, value in report_view.rows:
             row = self.report_table.rowCount()
             self.report_table.insertRow(row)
             self.report_table.setItem(row, 0, QTableWidgetItem(parameter))
             self.report_table.setItem(row, 1, QTableWidgetItem(value or "-"))
 
-        findings = result.findings or ["Замечаний нет."]
         self.findings_table.setRowCount(0)
-        for finding in findings:
+        for finding in report_view.findings:
             row = self.findings_table.rowCount()
             self.findings_table.insertRow(row)
             self.findings_table.setItem(row, 0, QTableWidgetItem(str(finding)))
 
         self.report_table.resizeRowsToContents()
         self.findings_table.resizeRowsToContents()
+        self.show_evidence_frame(result)
 
     def report_rows(self, result):
-        rows = [
-            ("Файл", result.file_name),
-            ("Тип", media_label(result.media_type)),
-            ("Размер", file_size_label(result.file_size)),
-            ("Длительность", self.duration_label(result.duration)),
-            ("Итог", "Ошибка" if result.status == STATUS_ERROR else verdict_label(result.verdict)),
-            ("Вероятность", confidence_label(result.confidence)),
-            ("Ответ модели", result.raw_result),
-        ]
+        return self.visualization_stage.report_rows(result)
 
-        for key, value in sorted((result.technical_info or {}).items()):
-            if key not in HIDDEN_TECHNICAL_KEYS and value is not None and value != "":
-                rows.append((self.technical_label(key), self.technical_value(value)))
+    def show_evidence_frame(self, result):
+        evidence_path = self.visualization_stage.evidence_frame_path(result)
+        if evidence_path is None or not evidence_path.is_file():
+            self.clear_evidence_frame()
+            return
 
-        return rows
+        pixmap = QPixmap(str(evidence_path))
+        if pixmap.isNull():
+            self.clear_evidence_frame()
+            return
+
+        scaled = pixmap.scaled(720, 260, Qt.KeepAspectRatio, Qt.SmoothTransformation)
+        self.evidence_frame_view.setPixmap(scaled)
+        self.evidence_frame_view.setVisible(True)
+        self.evidence_frame_caption.setText(self.visualization_stage.evidence_frame_label(result))
+        self.evidence_frame_caption.setVisible(True)
+
+    def clear_evidence_frame(self):
+        self.evidence_frame_view.clear()
+        self.evidence_frame_view.setVisible(False)
+        self.evidence_frame_caption.clear()
+        self.evidence_frame_caption.setVisible(False)
 
     def export_report_pdf(self):
         if self.current_result is None:
@@ -464,105 +491,153 @@ class DeepfakeDetectorWindow(QMainWindow):
 
     def write_report_pdf(self, result, file_path):
         writer = QPdfWriter(file_path)
-        writer.setPageSize(QPageSize(QPageSize.A4))
-        writer.setPageMargins(QMarginsF(14, 14, 14, 14), QPageLayout.Millimeter)
+        page_layout = QPageLayout(
+            QPageSize(QPageSize.A4),
+            QPageLayout.Portrait,
+            QMarginsF(PDF_MARGIN_MM, PDF_MARGIN_MM, PDF_MARGIN_MM, PDF_MARGIN_MM),
+            QPageLayout.Millimeter,
+        )
+        writer.setPageLayout(page_layout)
+        paint_rect = page_layout.paintRectPoints()
 
         document = QTextDocument()
+        document.setDocumentMargin(0)
+        document.setPageSize(QSizeF(paint_rect.width(), paint_rect.height()))
+        document.setTextWidth(paint_rect.width())
         document.setHtml(self.build_report_html(result))
         document.print_(writer)
 
     def build_report_html(self, result):
         verdict = "Ошибка" if result.status == STATUS_ERROR else verdict_label(result.verdict)
         confidence = confidence_label(result.confidence)
+        report_view = self.visualization_stage.build_report_view(result)
+        badge_class = self.report_badge_class(result)
         rows_html = "\n".join(
             "<tr>"
             f"<th>{html.escape(parameter)}</th>"
             f"<td>{html.escape(str(value or '-'))}</td>"
             "</tr>"
-            for parameter, value in self.report_rows(result)
+            for parameter, value in report_view.rows
         )
-        findings = result.findings or ["Замечаний нет."]
-        findings_html = "\n".join(f"<li>{html.escape(str(finding))}</li>" for finding in findings)
+        findings_html = "\n".join(f"<li>{html.escape(str(finding))}</li>" for finding in report_view.findings)
+        evidence_html = self.visualization_stage.build_evidence_frame_html(result, PDF_EVIDENCE_IMAGE_WIDTH_PT)
 
-        return f"""
-        <!doctype html>
-        <html>
-        <head>
-            <meta charset="utf-8">
-            <style>
-                body {{
-                    color: #111827;
-                    font-family: "Segoe UI", Arial, sans-serif;
-                    font-size: 11pt;
-                }}
-                .header {{
-                    border-bottom: 2px solid #2563eb;
-                    margin-bottom: 18px;
-                    padding-bottom: 12px;
-                }}
-                h1 {{
-                    color: #111827;
-                    font-size: 22pt;
-                    margin: 0 0 6px 0;
-                }}
-                .subtitle {{
-                    color: #4b5563;
-                    font-size: 10pt;
-                }}
-                .badge {{
-                    background: #eff6ff;
-                    border: 1px solid #bfdbfe;
-                    border-radius: 8px;
-                    color: #1d4ed8;
-                    display: inline-block;
-                    font-size: 14pt;
-                    font-weight: 700;
-                    margin: 10px 0 16px 0;
-                    padding: 10px 14px;
-                }}
-                table {{
-                    border-collapse: collapse;
-                    width: 100%;
-                }}
-                th {{
-                    background: #f8fafc;
-                    color: #334155;
-                    font-weight: 700;
-                    text-align: left;
-                    width: 32%;
-                }}
-                th, td {{
-                    border: 1px solid #d9e1ea;
-                    padding: 8px 10px;
-                    vertical-align: top;
-                }}
-                h2 {{
-                    color: #111827;
-                    font-size: 15pt;
-                    margin: 20px 0 8px 0;
-                }}
-                ul {{
-                    margin-top: 6px;
-                    padding-left: 22px;
-                }}
-                li {{
-                    margin-bottom: 8px;
-                }}
-            </style>
-        </head>
-        <body>
-            <div class="header">
-                <h1>Отчет о достоверности файла</h1>
-                <div class="subtitle">Deepfake Detector · локальный анализ медиафайла</div>
-            </div>
-            <div class="badge">{html.escape(verdict)} · {html.escape(confidence)}</div>
-            <h2>Параметры проверки</h2>
-            <table>{rows_html}</table>
-            <h2>Обнаруженные несоответствия</h2>
-            <ul>{findings_html}</ul>
-        </body>
-        </html>
-        """
+        return textwrap.dedent(
+            f"""
+            <!doctype html>
+            <html>
+            <head>
+                <meta charset="utf-8">
+                <style>
+                    body {{
+                        color: #111827;
+                        font-family: "Segoe UI", Arial, sans-serif;
+                        font-size: 11pt;
+                        line-height: 1.35;
+                        margin: 0;
+                        padding: 0;
+                    }}
+                    .header {{
+                        border-bottom: 2px solid #dbe4ef;
+                        margin: 0 0 12px 0;
+                        padding: 0 0 10px 0;
+                    }}
+                    h1 {{
+                        color: #111827;
+                        font-size: 21pt;
+                        margin: 0 0 5px 0;
+                    }}
+                    .subtitle {{
+                        color: #4b5563;
+                        font-size: 10pt;
+                    }}
+                    .badge {{
+                        border-radius: 6px;
+                        display: inline-block;
+                        font-size: 13pt;
+                        font-weight: 700;
+                        margin: 0 0 14px 0;
+                        padding: 8px 11px;
+                    }}
+                    .badgeDanger {{
+                        background: #fef2f2;
+                        border: 1px solid #fecaca;
+                        color: #991b1b;
+                    }}
+                    .badgeSuccess {{
+                        background: #ecfdf5;
+                        border: 1px solid #a7f3d0;
+                        color: #047857;
+                    }}
+                    .badgeNeutral {{
+                        background: #eff6ff;
+                        border: 1px solid #bfdbfe;
+                        color: #1d4ed8;
+                    }}
+                    table {{
+                        border-collapse: collapse;
+                        margin: 0 0 12px 0;
+                        width: 100%;
+                    }}
+                    th {{
+                        background: #f1f5f9;
+                        color: #334155;
+                        font-weight: 700;
+                        text-align: left;
+                        width: 34%;
+                    }}
+                    th, td {{
+                        border: 1px solid #d8e1ec;
+                        padding: 6px 8px;
+                        vertical-align: top;
+                    }}
+                    h2 {{
+                        color: #111827;
+                        font-size: 14pt;
+                        margin: 12px 0 7px 0;
+                    }}
+                    ul {{
+                        margin: 4px 0 10px 0;
+                        padding-left: 20px;
+                    }}
+                    li {{
+                        margin-bottom: 5px;
+                    }}
+                    .evidenceBlock {{
+                        margin: 10px 0 0 0;
+                        page-break-inside: avoid;
+                    }}
+                    .evidenceBlock h2 {{
+                        margin-top: 0;
+                    }}
+                    .evidenceBlock img {{
+                        border: 1px solid #cbd5e1;
+                        display: block;
+                        margin: 6px 0 0 0;
+                    }}
+                    .evidenceBlock p {{
+                        color: #334155;
+                        font-size: 10pt;
+                        font-weight: 600;
+                        margin: 6px 0 0 0;
+                    }}
+                </style>
+            </head>
+            <body>
+                <div class="header">
+                    <h1>Отчет о достоверности файла</h1>
+                    <div class="subtitle">Deepfake Detector · локальный анализ медиафайла</div>
+                </div>
+                <div class="badge {badge_class}">{html.escape(verdict)} · {html.escape(confidence)}</div>
+                <h2>Параметры проверки</h2>
+                <table>{rows_html}</table>
+                <h2>Обнаруженные несоответствия</h2>
+                <ul>{findings_html}</ul>
+                {evidence_html}
+            </body>
+            </html>
+            """
+        ).strip()
 
     @staticmethod
     def default_pdf_name(result):
@@ -571,46 +646,12 @@ class DeepfakeDetectorWindow(QMainWindow):
         return f"{safe_name}_report.pdf"
 
     @staticmethod
-    def duration_label(duration):
-        if duration is None:
-            return "-"
-
-        total_seconds = int(round(duration))
-        minutes, seconds = divmod(total_seconds, 60)
-        hours, minutes = divmod(minutes, 60)
-
-        if hours:
-            return f"{hours:02d}:{minutes:02d}:{seconds:02d}"
-        return f"{minutes:02d}:{seconds:02d}"
-
-    @staticmethod
-    def technical_label(key):
-        labels = {
-            "channels": "Каналы",
-            "database_integrity_status": "Целостность записи",
-            "database_record_hash": "Хэш записи БД",
-            "extension": "Расширение",
-            "format": "Формат",
-            "fps": "FPS",
-            "frame_count": "Кадры",
-            "height": "Высота",
-            "preprocess_warning": "Предобработка",
-            "resolution": "Разрешение",
-            "sample_rate": "Sample rate",
-            "security_checks": "Проверки безопасности",
-            "security_status": "Статус безопасности",
-            "security_warning": "Предупреждение безопасности",
-            "sha256": "SHA-256",
-            "subtype": "Subtype",
-            "width": "Ширина",
-        }
-        return labels.get(key, key)
-
-    @staticmethod
-    def technical_value(value):
-        if isinstance(value, (list, tuple)):
-            return "; ".join(str(item) for item in value)
-        return str(value)
+    def report_badge_class(result):
+        if result.status == STATUS_ERROR or result.verdict == VERDICT_DEEPFAKE:
+            return "badgeDanger"
+        if result.verdict == VERDICT_ORIGINAL:
+            return "badgeSuccess"
+        return "badgeNeutral"
 
     def set_controls_enabled(self, enabled):
         self.audio_button.setEnabled(enabled)

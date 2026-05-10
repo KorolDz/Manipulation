@@ -4,6 +4,7 @@ from pathlib import Path
 PROJECT_ROOT = Path(__file__).resolve().parents[2]
 DATA_DIR = PROJECT_ROOT / "data"
 DATABASE_PATH = DATA_DIR / "app.sqlite3"
+EVIDENCE_FRAMES_DIR = DATA_DIR / "evidence_frames"
 
 AUDIO = "audio"
 VIDEO = "video"

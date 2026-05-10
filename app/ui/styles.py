@@ -192,4 +192,17 @@ QHeaderView::section {
 QTableWidget::item {
     padding: 9px;
 }
+
+#evidenceFrameView {
+    background: #f8fafc;
+    border: 1px solid #d9e1ea;
+    border-radius: 8px;
+    padding: 8px;
+}
+
+#evidenceFrameCaption {
+    color: #374151;
+    font-size: 14px;
+    font-weight: 600;
+}
 """

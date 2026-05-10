@@ -44,6 +44,12 @@ class AnalysisResult:
 
 
 @dataclass(frozen=True)
+class ReportView:
+    rows: list[tuple[str, str]]
+    findings: list[str] = field(default_factory=list)
+
+
+@dataclass(frozen=True)
 class HistoryRecord:
     id: int
     created_at: str
